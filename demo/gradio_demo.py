@@ -806,7 +806,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     .speaker-item { overflow: visible !important; }
 
     /* Provide local positioning context and raise stacking */
-    .speaker-item { position: relative; z-index: 1; }
+    .speaker-item { position: relative; z-index: 1000 !important; }
 
     /* Gradio dropdown popover wrapper is usually an .absolute sibling of input within .wrap */
     .speaker-item .wrap { overflow: visible !important; position: relative; }
@@ -818,17 +818,21 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     }
 
     /* Also elevate the ARIA listbox in case it has a separate stacking context */
-    .gradio-container div[role="listbox"] { z-index: 10001 !important; }
+    .gradio-container div[role="listbox"] { z-index: 200000 !important; }
 
     /* General fallback for absolute popovers used by Gradio */
     .gradio-container .absolute,
     .gradio-container .z-20,
     .gradio-container .z-30,
     .gradio-container .z-40,
-    .gradio-container .z-50 { z-index: 10000 !important; }
+    .gradio-container .z-50 { z-index: 200000 !important; }
 
     /* Ensure portal-based menus are above everything */
-    .fixed { z-index: 100000 !important; }
+    .fixed { z-index: 300000 !important; }
+
+    /* Ensure slider does not sit above dropdown popovers */
+    .slider-container { position: relative; z-index: 0 !important; overflow: visible !important; }
+    .slider-container input[type="range"] { position: relative; z-index: 0 !important; }
 
     /* ========================= */
     /*        Dark Mode          */
