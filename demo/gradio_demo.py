@@ -827,21 +827,8 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     .gradio-container .z-40,
     .gradio-container .z-50 { z-index: 10000 !important; }
 
-    /* Stronger positioning: anchor listbox to its input wrapper */
-    .gradio-container .wrap { position: relative !important; overflow: visible !important; }
-    .gradio-container .wrap [role="listbox"],
-    .gradio-container .wrap > .absolute,
-    .gradio-container .wrap .absolute [role="listbox"] {
-        position: absolute !important;
-        top: calc(100% + 8px) !important;
-        left: 0 !important;
-        right: 0 !important;
-        bottom: auto !important;
-        transform: none !important;
-        z-index: 999999 !important;
-        max-height: 320px;
-        overflow: auto;
-    }
+    /* Ensure portal-based menus are above everything */
+    .fixed { z-index: 100000 !important; }
 
     /* ========================= */
     /*        Dark Mode          */
@@ -936,6 +923,14 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
     .gradio-container [role="option"][aria-selected="true"],
     .gradio-container [role="option"]:hover {
         background-color: #0f172a !important;
+    }
+
+    /* Remove blur/backdrop filters that create problematic stacking/containing contexts */
+    .settings-card, .generation-card {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+        position: relative;
+        z-index: 0;
     }
     """
     
