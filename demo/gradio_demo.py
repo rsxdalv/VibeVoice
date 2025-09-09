@@ -798,6 +798,144 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
         box-shadow: 0 6px 25px rgba(100, 116, 139, 0.4);
         background: linear-gradient(135deg, #475569 0%, #334155 100%);
     }
+
+    /* --- Dropdown fixes: ensure correct stacking & positioning --- */
+    /* Allow popovers to overflow card boundaries */
+    .settings-card,
+    .generation-card,
+    .speaker-item { overflow: visible !important; }
+
+    /* Provide local positioning context and raise stacking */
+    .speaker-item { position: relative; z-index: 1000 !important; }
+
+    /* Gradio dropdown popover wrapper is usually an .absolute sibling of input within .wrap */
+    .speaker-item .wrap { overflow: visible !important; position: relative; }
+    .speaker-item .wrap > .absolute {
+        z-index: 10000 !important;
+        top: calc(100% + 6px) !important;
+        bottom: auto !important;
+        transform-origin: top !important;
+    }
+
+    /* Also elevate the ARIA listbox in case it has a separate stacking context */
+    .gradio-container div[role="listbox"] { z-index: 200000 !important; }
+
+    /* General fallback for absolute popovers used by Gradio */
+    .gradio-container .absolute,
+    .gradio-container .z-20,
+    .gradio-container .z-30,
+    .gradio-container .z-40,
+    .gradio-container .z-50 { z-index: 200000 !important; }
+
+    /* Ensure portal-based menus are above everything */
+    .fixed { z-index: 300000 !important; }
+
+    /* Ensure slider does not sit above dropdown popovers */
+    .slider-container { position: relative; z-index: 0 !important; overflow: visible !important; }
+    .slider-container input[type="range"] { position: relative; z-index: 0 !important; }
+
+    /* ========================= */
+    /*        Dark Mode          */
+    /* ========================= */
+    :root { color-scheme: dark; }
+
+    .gradio-container {
+        background: radial-gradient(1200px 800px at 20% 0%, #0b1220 0%, #0a0f1a 40%, #090e19 100%);
+        color: #e5e7eb;
+    }
+
+    .main-header {
+        background: linear-gradient(90deg, #0ea5e9 0%, #7c3aed 100%);
+        box-shadow: 0 10px 40px rgba(20, 184, 166, 0.15);
+    }
+    .main-header h1 { color: #ffffff; }
+    .main-header p { color: rgba(255,255,255,0.82); }
+
+    .settings-card, .generation-card {
+        background: rgba(2, 6, 23, 0.72);
+        border: 1px solid rgba(51, 65, 85, 0.7);
+        box-shadow: 0 8px 32px rgba(2, 6, 23, 0.6);
+    }
+
+    .speaker-item {
+        background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+        border: 1px solid rgba(71, 85, 105, 0.55);
+        color: #e2e8f0;
+    }
+
+    .generate-btn {
+        background: linear-gradient(135deg, #059669 0%, #0f766e 100%);
+        box-shadow: 0 4px 20px rgba(5, 150, 105, 0.35);
+    }
+    .generate-btn:hover {
+        box-shadow: 0 6px 25px rgba(5, 150, 105, 0.55);
+    }
+
+    .stop-btn {
+        background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+        box-shadow: 0 4px 20px rgba(220, 38, 38, 0.35);
+    }
+    .stop-btn:hover {
+        box-shadow: 0 6px 25px rgba(220, 38, 38, 0.55);
+    }
+
+    .random-btn {
+        background: linear-gradient(135deg, #334155 0%, #1f2937 100%);
+        box-shadow: 0 4px 20px rgba(31, 41, 55, 0.35);
+        color: #e5e7eb;
+    }
+    .random-btn:hover {
+        background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+        box-shadow: 0 6px 25px rgba(31, 41, 55, 0.5);
+    }
+
+    .audio-output {
+        background: linear-gradient(135deg, #0b1220 0%, #0f172a 100%);
+        border: 1px solid rgba(51, 65, 85, 0.6);
+    }
+
+    .complete-audio-section {
+        background: linear-gradient(135deg, rgba(6, 78, 59, 0.2) 0%, rgba(4, 120, 87, 0.15) 100%);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+
+    .script-input, .log-output {
+        background: rgba(15, 23, 42, 0.92) !important;
+        border: 1px solid rgba(51, 65, 85, 0.8) !important;
+        color: #e2e8f0 !important;
+    }
+    .script-input::placeholder { color: #94a3b8 !important; }
+
+    .slider-container {
+        background: rgba(2, 6, 23, 0.6);
+        border: 1px solid rgba(51, 65, 85, 0.7);
+    }
+
+    .gradio-container label { color: #e2e8f0 !important; }
+    .gradio-container .markdown { color: #e5e7eb !important; }
+
+    /* Dropdown menu dark palette */
+    .gradio-container div[role="listbox"] {
+        background-color: #0b1220 !important;
+        border: 1px solid #334155 !important;
+        color: #e5e7eb !important;
+        box-shadow: 0 12px 32px rgba(2, 6, 23, 0.7);
+    }
+    .gradio-container [role="option"] {
+        color: #e5e7eb !important;
+    }
+    .gradio-container [role="option"][aria-selected="true"],
+    .gradio-container [role="option"]:hover {
+        background-color: #0f172a !important;
+    }
+
+    /* Remove blur/backdrop filters that create problematic stacking/containing contexts */
+    .settings-card, .generation-card {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+        position: relative;
+        z-index: 0;
+    }
     """
     
     with gr.Blocks(
