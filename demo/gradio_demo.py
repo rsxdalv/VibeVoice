@@ -3,24 +3,21 @@ VibeVoice Gradio Demo - High-Quality Dialogue Generation Interface with Streamin
 """
 
 import argparse
-import json
+import base64
+import io
 import os
-import sys
-import tempfile
+import queue
 import time
-from pathlib import Path
-from typing import List, Dict, Any, Iterator
-from datetime import datetime
+import uuid
+from typing import Dict, Any, Iterator
 import threading
 import numpy as np
 import gradio as gr
 import librosa
 import soundfile as sf
 import torch
-import os
 import traceback
 
-from vibevoice.modular.configuration_vibevoice import VibeVoiceConfig
 from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
 from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
 from vibevoice.modular.streamer import AudioStreamer
@@ -40,6 +37,8 @@ class VibeVoiceDemo:
         self.is_generating = False  # Track generation state
         self.stop_generation = False  # Flag to stop generation
         self.current_streamer = None  # Track current audio streamer
+        self.streaming_sessions: Dict[str, Dict[str, Any]] = {}
+        self.streaming_sessions_lock = threading.Lock()
         self.load_model()
         self.setup_voice_presets()
         self.load_example_scripts()  # Load example scripts
@@ -373,7 +372,6 @@ class VibeVoiceDemo:
                 if should_yield and pending_chunks:
                     # Concatenate and yield only the new audio chunks
                     new_audio = np.concatenate(pending_chunks)
-                    new_duration = len(new_audio) / sample_rate
                     total_duration = sum(len(chunk) for chunk in all_audio_chunks) / sample_rate
                     
                     log_update = log + f"🎵 Streaming: {total_duration:.1f}s generated (chunk {chunk_count})\n"
@@ -476,6 +474,213 @@ class VibeVoiceDemo:
             traceback.print_exc()
             yield None, None, error_msg, gr.update(visible=False)
     
+    def generate_podcast_full(self,
+                              num_speakers: int,
+                              script: str,
+                              speaker_1: str = None,
+                              speaker_2: str = None,
+                              speaker_3: str = None,
+                              speaker_4: str = None,
+                              cfg_scale: float = 1.3):
+        """Generate a complete podcast and return once the full audio is ready."""
+        generation = self.generate_podcast_streaming(
+            num_speakers=num_speakers,
+            script=script,
+            speaker_1=speaker_1,
+            speaker_2=speaker_2,
+            speaker_3=speaker_3,
+            speaker_4=speaker_4,
+            cfg_scale=cfg_scale,
+        )
+
+        final_audio = None
+        final_log = ""
+
+        try:
+            for _, complete_audio, log, _ in generation:
+                final_log = log
+                if complete_audio is not None:
+                    final_audio = complete_audio
+                    break
+        finally:
+            if hasattr(generation, "close"):
+                try:
+                    generation.close()
+                except Exception:
+                    pass
+
+        if final_audio is None:
+            raise gr.Error("❌ Generation finished without producing complete audio.")
+
+        return final_audio, final_log
+
+    def _encode_audio_chunk(self, audio_tuple):
+        """Serialize an audio tuple (sample_rate, waveform) to base64 WAV payload."""
+        if audio_tuple is None:
+            return None
+
+        sample_rate, audio_array = audio_tuple
+        audio_np = np.asarray(audio_array)
+
+        if audio_np.ndim > 1:
+            audio_np = audio_np.squeeze()
+
+        if audio_np.dtype != np.int16:
+            audio_np = convert_to_16_bit_wav(audio_np)
+
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_np, sample_rate, subtype="PCM_16", format="WAV")
+        buffer.seek(0)
+        encoded_audio = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        return {
+            "sample_rate": int(sample_rate),
+            "num_samples": int(len(audio_np)),
+            "base64_wav": encoded_audio,
+        }
+
+    def start_streaming_session(self,
+                                num_speakers: int,
+                                script: str,
+                                speaker_1: str = None,
+                                speaker_2: str = None,
+                                speaker_3: str = None,
+                                speaker_4: str = None,
+                                cfg_scale: float = 1.3) -> str:
+        """Start a background streaming session and return a session identifier."""
+
+        with self.streaming_sessions_lock:
+            active = any(session.get("status") == "running" for session in self.streaming_sessions.values())
+
+        if self.is_generating or active:
+            raise gr.Error("❌ Another generation is already running. Please wait for it to finish before starting a new session.")
+
+        session_id = str(uuid.uuid4())
+        session_state = {
+            "queue": queue.Queue(),
+            "status": "running",
+            "log": "",
+            "error": None,
+            "final_audio": None,
+        }
+
+        with self.streaming_sessions_lock:
+            self.streaming_sessions[session_id] = session_state
+
+        def run_session():
+            try:
+                for streaming_audio, complete_audio, log, _ in self.generate_podcast_streaming(
+                    num_speakers=num_speakers,
+                    script=script,
+                    speaker_1=speaker_1,
+                    speaker_2=speaker_2,
+                    speaker_3=speaker_3,
+                    speaker_4=speaker_4,
+                    cfg_scale=cfg_scale,
+                ):
+                    session_state["log"] = log
+
+                    if streaming_audio is not None:
+                        session_state["queue"].put({
+                            "type": "chunk",
+                            "payload": self._encode_audio_chunk(streaming_audio),
+                            "log": log,
+                        })
+
+                    if complete_audio is not None:
+                        encoded_final = self._encode_audio_chunk(complete_audio)
+                        session_state["final_audio"] = encoded_final
+                        session_state["queue"].put({
+                            "type": "final",
+                            "payload": encoded_final,
+                            "log": log,
+                        })
+                        session_state["status"] = "completed"
+                        break
+
+                if session_state.get("status") != "completed" and session_state.get("error") is None:
+                    session_state["status"] = "failed"
+                    session_state["error"] = "Generation ended without producing complete audio."
+
+            except gr.Error as e:
+                session_state["status"] = "failed"
+                session_state["error"] = str(e)
+            except Exception as e:
+                session_state["status"] = "failed"
+                session_state["error"] = str(e)
+                traceback.print_exc()
+            finally:
+                session_state["queue"].put({
+                    "type": "status",
+                    "status": session_state["status"],
+                    "log": session_state.get("log"),
+                    "error": session_state.get("error"),
+                })
+
+        worker = threading.Thread(target=run_session, daemon=True)
+        session_state["thread"] = worker
+        worker.start()
+
+        return session_id
+
+    def poll_streaming_session(self, session_id: str) -> Dict[str, Any]:
+        """Collect new updates for a streaming session."""
+        with self.streaming_sessions_lock:
+            session_state = self.streaming_sessions.get(session_id)
+
+        if session_state is None:
+            return {
+                "status": "not_found",
+                "error": "Session not found.",
+                "updates": [],
+            }
+
+        updates = []
+        while True:
+            try:
+                updates.append(session_state["queue"].get_nowait())
+            except queue.Empty:
+                break
+
+        response = {
+            "status": session_state.get("status", "unknown"),
+            "log": session_state.get("log", ""),
+            "updates": updates,
+        }
+
+        if session_state.get("status") == "failed":
+            response["error"] = session_state.get("error")
+
+        if session_state.get("status") == "completed" and session_state.get("final_audio"):
+            response["final_audio"] = session_state["final_audio"]
+
+        if session_state.get("status") in {"completed", "failed"} and not updates:
+            with self.streaming_sessions_lock:
+                self.streaming_sessions.pop(session_id, None)
+
+        return response
+
+    def stop_streaming_session(self, session_id: str) -> Dict[str, Any]:
+        """Attempt to stop an active streaming session early."""
+        with self.streaming_sessions_lock:
+            session_state = self.streaming_sessions.get(session_id)
+
+        if session_state is None:
+            return {"status": "not_found", "error": "Session not found."}
+
+        if session_state.get("status") not in {"running"}:
+            return {"status": session_state.get("status")}
+
+        self.stop_audio_generation()
+        session_state["status"] = "stopping"
+        session_state["queue"].put({
+            "type": "status",
+            "status": "stopping",
+            "log": session_state.get("log"),
+        })
+
+        return {"status": "stopping"}
+
     def _generate_with_streamer(self, inputs, cfg_scale, audio_streamer):
         """Helper method to run generation with streamer in a separate thread."""
         try:
@@ -488,7 +693,7 @@ class VibeVoiceDemo:
             def check_stop_generation():
                 return self.stop_generation
                 
-            outputs = self.model.generate(
+            self.model.generate(
                 **inputs,
                 max_new_tokens=None,
                 cfg_scale=cfg_scale,
@@ -1108,6 +1313,23 @@ Or paste text directly and it will auto-assign speakers.""",
                     interactive=False,
                     elem_classes="log-output"
                 )
+
+                # Hidden outputs for API-only usage
+                api_payload_output = gr.JSON(
+                    label="Complete Podcast Payload (API)",
+                    visible=False
+                )
+
+                api_log_output = gr.Textbox(
+                    label="API Generation Log",
+                    visible=False,
+                    interactive=False
+                )
+
+                stream_session_output = gr.Textbox(visible=False)
+                stream_session_input = gr.Textbox(visible=False)
+                stream_poll_output = gr.JSON(visible=False)
+                stream_stop_output = gr.JSON(visible=False)
         
         def update_speaker_visibility(num_speakers):
             updates = []
@@ -1132,9 +1354,6 @@ Or paste text directly and it will auto-assign speakers.""",
                 # Clear outputs and reset visibility at start
                 yield None, gr.update(value=None, visible=False), "🎙️ Starting generation...", gr.update(visible=True), gr.update(visible=False), gr.update(visible=True)
                 
-                # The generator will yield multiple times
-                final_log = "Starting generation..."
-                
                 for streaming_audio, complete_audio, log, streaming_visible in demo_instance.generate_podcast_streaming(
                     num_speakers=int(num_speakers),
                     script=script,
@@ -1144,8 +1363,6 @@ Or paste text directly and it will auto-assign speakers.""",
                     speaker_4=speakers[3],
                     cfg_scale=cfg_scale
                 ):
-                    final_log = log
-                    
                     # Check if we have complete audio (final yield)
                     if complete_audio is not None:
                         # Final state: clear streaming, show complete audio
@@ -1166,6 +1383,57 @@ Or paste text directly and it will auto-assign speakers.""",
                 # Reset button states on error
                 yield None, gr.update(value=None, visible=False), error_msg, gr.update(visible=False), gr.update(visible=True), gr.update(visible=False)
         
+        def generate_podcast_full_api(num_speakers, script, *speakers_and_params):
+            """API helper that returns the complete audio payload once ready."""
+            try:
+                speakers = speakers_and_params[:4]
+                cfg_scale = speakers_and_params[4]
+
+                complete_audio, final_log = demo_instance.generate_podcast_full(
+                    num_speakers=int(num_speakers),
+                    script=script,
+                    speaker_1=speakers[0],
+                    speaker_2=speakers[1],
+                    speaker_3=speakers[2],
+                    speaker_4=speakers[3],
+                    cfg_scale=cfg_scale,
+                )
+
+                payload = demo_instance._encode_audio_chunk(complete_audio)
+
+                if not payload or not payload.get("base64_wav"):
+                    raise gr.Error("❌ Generation finished without audio samples.")
+
+                return payload, final_log
+
+            except gr.Error:
+                raise
+            except Exception as e:
+                error_msg = f"❌ Failed to generate complete audio: {str(e)}"
+                print(error_msg)
+                traceback.print_exc()
+                raise gr.Error(error_msg)
+
+        def start_external_streaming(num_speakers, script, *speakers_and_params):
+            speakers = speakers_and_params[:4]
+            cfg_scale = speakers_and_params[4]
+
+            return demo_instance.start_streaming_session(
+                num_speakers=int(num_speakers),
+                script=script,
+                speaker_1=speakers[0],
+                speaker_2=speakers[1],
+                speaker_3=speakers[2],
+                speaker_4=speakers[3],
+                cfg_scale=cfg_scale,
+            )
+
+        def poll_external_streaming(session_id):
+            return demo_instance.poll_streaming_session(str(session_id))
+
+        def stop_external_streaming(session_id):
+            return demo_instance.stop_streaming_session(str(session_id))
+
         def stop_generation_handler():
             """Handle stopping generation."""
             demo_instance.stop_audio_generation()
@@ -1193,6 +1461,45 @@ Or paste text directly and it will auto-assign speakers.""",
             inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale],
             outputs=[audio_output, complete_audio_output, log_output, streaming_status, generate_btn, stop_btn],
             queue=True  # Enable Gradio's built-in queue
+        )
+
+        # Hidden trigger for API access (non-streaming endpoint)
+        api_trigger = gr.Button(visible=False)
+
+        api_trigger.click(
+            fn=generate_podcast_full_api,
+            inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale],
+            outputs=[api_payload_output, api_log_output],
+            queue=True,
+            api_name="generate_podcast_full"
+        )
+
+        stream_start_btn = gr.Button(visible=False)
+        stream_poll_btn = gr.Button(visible=False)
+        stream_stop_btn = gr.Button(visible=False)
+
+        stream_start_btn.click(
+            fn=start_external_streaming,
+            inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale],
+            outputs=[stream_session_output],
+            queue=True,
+            api_name="stream_start"
+        )
+
+        stream_poll_btn.click(
+            fn=poll_external_streaming,
+            inputs=[stream_session_input],
+            outputs=[stream_poll_output],
+            queue=False,
+            api_name="stream_poll"
+        )
+
+        stream_stop_btn.click(
+            fn=stop_external_streaming,
+            inputs=[stream_session_input],
+            outputs=[stream_stop_output],
+            queue=False,
+            api_name="stream_stop"
         )
         
         # Connect stop button
@@ -1358,8 +1665,8 @@ def main():
     print(f"🚀 Launching demo on port {args.port}")
     print(f"📁 Model path: {args.model_path}")
     print(f"🎭 Available voices: {len(demo_instance.available_voices)}")
-    print(f"🔴 Streaming mode: ENABLED")
-    print(f"🔒 Session isolation: ENABLED")
+    print("🔴 Streaming mode: ENABLED")
+    print("🔒 Session isolation: ENABLED")
     
     # Launch the interface
     try:
@@ -1368,10 +1675,10 @@ def main():
             default_concurrency_limit=1  # Process one request at a time
         ).launch(
             share=args.share,
-            # server_port=args.port,
+            server_port=args.port,
             server_name="0.0.0.0" if args.share else "127.0.0.1",
             show_error=True,
-            show_api=False  # Hide API docs for cleaner interface
+            show_api=True  # Show API docs for cleaner interface
         )
     except KeyboardInterrupt:
         print("\n🛑 Shutting down gracefully...")
